@@ -1,18 +1,36 @@
-mod model;
-#[cfg(test)]
-mod test;
+use actix_web::{get, put, patch, web::{self, Form}, App, HttpResponse, HttpServer, Responder};
+use mongodb::{bson::doc, options::IndexOptions, Client, Collection, IndexModel, results::DeleteResult};
+use serde::{Deserialize, Serialize};
+use futures_util::{stream::TryStreamExt};
 
-use actix_web::{get, post, web, App, HttpResponse, HttpServer};
-use model::User;
-use mongodb::{bson::doc, options::IndexOptions, Client, Collection, IndexModel};
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct User {
+    first_name: String,
+    last_name: String,
+    username: String,
+    email: String,
+}
 
 const DB_NAME: &str = "myApp";
 const COLL_NAME: &str = "users";
 
-#[post("/add_user")]
-async fn add_user(client: web::Data<Client>, form: web::Form<User>) -> HttpResponse {
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Update {
+    first_name: String,
+    last_name: String,
+    email: String,
+}
+
+#[get("/")]
+async fn start() -> HttpResponse {
+    HttpResponse::Ok().body("Connected")
+}
+
+#[get("/add_user")]
+async fn add_user(client: web::Data<Client>, valuez: web::Json<User>) -> impl Responder {
     let collection = client.database(DB_NAME).collection(COLL_NAME);
-    let result = collection.insert_one(form.into_inner(), None).await;
+    // println!("{}",valuez.first_name.to_string());
+    let result = collection.insert_one(valuez, None).await;
     match result {
         Ok(_) => HttpResponse::Ok().body("user added"),
         Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
@@ -21,10 +39,9 @@ async fn add_user(client: web::Data<Client>, form: web::Form<User>) -> HttpRespo
 
 #[get("/get_user/{username}")]
 async fn get_user(client: web::Data<Client>, username: web::Path<String>) -> HttpResponse {
-    let username = username.into_inner();
     let collection: Collection<User> = client.database(DB_NAME).collection(COLL_NAME);
     match collection
-        .find_one(doc! { "username": &username }, None)
+        .find_one(doc! { "username": &username.to_string() }, None)
         .await
     {
         Ok(Some(user)) => HttpResponse::Ok().json(user),
@@ -32,6 +49,56 @@ async fn get_user(client: web::Data<Client>, username: web::Path<String>) -> Htt
             HttpResponse::NotFound().body(format!("No user found with username {username}"))
         }
         Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
+    }
+}
+
+#[get("/get_all_users")]
+async fn get_all_users(client: web::Data<Client>) -> HttpResponse {
+    let collection: Collection<User> = client.database(DB_NAME).collection(COLL_NAME);
+    let cursor = collection.find(None, None).await;
+    match cursor {
+        Ok(cursor) => {
+            let users: Vec<User> = cursor.try_collect().await.unwrap();
+            println!("print {:?}",users);
+            HttpResponse::Ok().json(users)
+        }
+        Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
+    }
+}
+
+#[patch("/update/{username}")]
+async fn update_user(client: web::Data<Client>,updt: web::Form<Update>, username: web::Path<String>) -> impl Responder {
+    let collection: Collection<User> = client.database(DB_NAME).collection(COLL_NAME);
+    
+    let updt_val = doc! { "$set": {
+        "first_name": &updt.first_name,
+        "last_name": &updt.last_name,
+        "email": &updt.email
+    }
+    };
+
+    match collection.update_one(doc! { "username": &username.to_string()},updt_val, None).await {
+        Ok(_) => HttpResponse::Ok().body("user updated"),
+        Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
+    }
+    // let result = collection.update_one({"username": &username.to_string()}, None).await;
+    // match update_one(doc! {"username": &username.to_string()}, None).await {
+    //     Ok(_) => HttpResponse::Ok().body("user updated"),
+    //     Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
+    // }
+    
+}
+
+#[get("/delete_user/{username}")]
+async fn delete_user(client: web::Data<Client>, username: web::Path<String>) -> HttpResponse {
+    let collection: Collection<User> = client.database(DB_NAME).collection(COLL_NAME);
+    match collection
+        .delete_one(doc! { "username": &username.to_string() }, None)
+        .await
+    {
+        
+        Ok(_) => HttpResponse::Ok().body("User successfully deleted"),
+        Err(_) => HttpResponse::InternalServerError().body("No user found for this username"),
     }
 }
 
@@ -59,8 +126,11 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(client.clone()))
+            .service(start)
             .service(add_user)
             .service(get_user)
+            .service(delete_user)
+            .service(get_all_users)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
